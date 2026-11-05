@@ -356,7 +356,7 @@ def plot_grid(active_data):
     for ax in axes[n:]:
         ax.axis("off")
     for (dist, x, y, p, label, color, linestyle), ax in zip(active_data, axes[:n]):
-        plot_single(ax, dist, x, y, show_stats=True, params=p, label=label, color=color, linestyle=linestyle)
+        plot_single(ax, dist, x, y, show_stats=True, params=p, label=label, color=color, linestyle="-")
     fig.tight_layout()
     return fig
 
@@ -499,7 +499,7 @@ def build_download_zip(all_data, summary_df):
                 params=p,
                 label=label,
                 color=color,
-                linestyle=linestyle,
+                linestyle="-",
             )
             filename = f"{index:02d}_{dist['key']}.png"
             archive.writestr(filename, figure_as_png(individual_fig))
