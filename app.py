@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import to_hex, to_rgb
 from scipy.stats import (
     beta as beta_dist,
     gamma as gamma_dist,
@@ -114,6 +115,88 @@ DISTRIBUTIONS = [
         ],
     },
 ]
+
+
+STATE_VERSION = 3
+LINE_STYLES = ["-", "--", "-.", ":"]
+
+
+def default_params(family):
+    return {spec["key"]: spec["default"] for spec in family["params"]}
+
+
+def make_instance(family, instance_id, visible=True):
+    return {
+        "id": instance_id,
+        "family": family["key"],
+        "visible": visible,
+        "params": default_params(family),
+    }
+
+
+def initialize_instances():
+    if st.session_state.get("instances_version") == STATE_VERSION:
+        return
+    clear_all_instance_widget_keys()
+    st.session_state.instances = [
+        make_instance(family, f"{family['key']}-1", visible=False)
+        for family in DISTRIBUTIONS
+    ]
+    st.session_state.instance_counters = {family["key"]: 1 for family in DISTRIBUTIONS}
+    st.session_state.instances_version = STATE_VERSION
+
+
+def family_instances(family_key):
+    return [instance for instance in st.session_state.instances if instance["family"] == family_key]
+
+
+def next_instance_id(family_key):
+    counter = st.session_state.instance_counters.get(family_key, 0) + 1
+    st.session_state.instance_counters[family_key] = counter
+    return f"{family_key}-{counter}"
+
+
+def clear_instance_widget_keys(instance_id):
+    prefixes = (f"show::{instance_id}", f"param::{instance_id}::")
+    for key in list(st.session_state.keys()):
+        if key.startswith(prefixes):
+            del st.session_state[key]
+
+
+def clear_all_instance_widget_keys():
+    for key in list(st.session_state.keys()):
+        if key.startswith(("show::", "param::")):
+            del st.session_state[key]
+
+
+def format_param_values(family, params):
+    return ", ".join(f"{params[spec['key']]:g}" for spec in family["params"])
+
+
+def instance_label(family, params):
+    return f"{family['name'].replace('Distribución ', '')} ({format_param_values(family, params)})"
+
+
+def instance_style(family, family_index):
+    base = np.array(to_rgb(family["color"]))
+    shade = min(0.14 * family_index, 0.58)
+    color = to_hex(base + (1 - base) * shade)
+    return color, LINE_STYLES[family_index % len(LINE_STYLES)]
+
+
+def make_unique_labels(active_data):
+    counts = {}
+    for data in active_data:
+        counts[data[4]] = counts.get(data[4], 0) + 1
+    seen = {}
+    unique_data = []
+    for data in active_data:
+        label = data[4]
+        if counts[label] > 1:
+            seen[label] = seen.get(label, 0) + 1
+            label = f"{label} #{seen[data[4]]}"
+        unique_data.append((*data[:4], label, *data[5:]))
+    return unique_data
 
 
 def compute_density(key, p):
@@ -218,11 +301,11 @@ def format_interval(interval):
 
 def build_statistics_table(active_data):
     rows = []
-    for dist, x, y, p in active_data:
+    for dist, x, y, p, label, color, linestyle in active_data:
         stats = distribution_statistics(dist["key"], p)
         rows.append(
             {
-                "Distribución": dist["name"],
+                "Distribución": label,
                 "Moda": format_statistic(stats["Moda"]),
                 "Mediana": format_statistic(stats["Mediana"]),
                 "Media": format_statistic(stats["Media"]),
@@ -233,12 +316,13 @@ def build_statistics_table(active_data):
     return pd.DataFrame(rows)
 
 
-def plot_single(ax, dist, x, y, show_stats=False, params=None):
+def plot_single(ax, dist, x, y, show_stats=False, params=None, label=None, color=None, linestyle="-"):
     """Dibuja una distribución con borde definido e interior semitransparente."""
-    color = dist["color"]
-    ax.plot(x, y, color=color, lw=2.5)
+    color = color or dist["color"]
+    label = label or dist["name"]
+    ax.plot(x, y, color=color, lw=2.5, linestyle=linestyle)
     ax.fill_between(x, y, color=color, alpha=0.2)
-    ax.set_title(dist["name"], fontsize=11, color=color)
+    ax.set_title(label, fontsize=11, color=color)
     ax.set_xlabel("Valor")
     ax.set_ylabel("Densidad")
     ax.grid(True, linestyle="--", alpha=0.5)
@@ -271,17 +355,17 @@ def plot_grid(active_data):
     axes = np.array(axes).reshape(-1)
     for ax in axes[n:]:
         ax.axis("off")
-    for (dist, x, y, p), ax in zip(active_data, axes[:n]):
-        plot_single(ax, dist, x, y, show_stats=True, params=p)
+    for (dist, x, y, p, label, color, linestyle), ax in zip(active_data, axes[:n]):
+        plot_single(ax, dist, x, y, show_stats=True, params=p, label=label, color=color, linestyle=linestyle)
     fig.tight_layout()
     return fig
 
 
 def plot_overlay(active_data):
     fig, ax = plt.subplots(figsize=(11, 6))
-    for dist, x, y, p in active_data:
-        ax.plot(x, y, color=dist["color"], lw=2.5, label=dist["name"])
-        ax.fill_between(x, y, color=dist["color"], alpha=0.2)
+    for dist, x, y, p, label, color, linestyle in active_data:
+        ax.plot(x, y, color=color, lw=2.5, linestyle=linestyle, label=label)
+        ax.fill_between(x, y, color=color, alpha=0.2)
     ax.set_xlabel("Valor")
     ax.set_ylabel("Densidad")
     ax.set_title("Distribuciones a priori superpuestas")
@@ -300,9 +384,9 @@ def build_snippet(active_data):
         "# Los valores siguientes reproducen las distribuciones graficadas.",
         "priors = {",
     ]
-    for dist, x, y, p in active_data:
+    for dist, x, y, p, label, color, linestyle in active_data:
         args = ", ".join(f"{k}={v:.3g}" for k, v in p.items())
-        lines.append(f'    "{dist["name"]}": tfd.{dist["meridian"]}({args}),')
+        lines.append(f'    "{label}": tfd.{dist["meridian"]}({args}),')
     lines.append("}")
     return "\n".join(lines)
 
@@ -310,11 +394,11 @@ def build_snippet(active_data):
 def build_summary(active_data):
     """Construye una fila por distribución con sus parámetros ordenados."""
     rows = []
-    for dist, x, y, p in active_data:
+    for dist, x, y, p, label, color, linestyle in active_data:
         ordered_params = ", ".join(f"{key}={value:g}" for key, value in p.items())
         rows.append(
             {
-                "Distribución": dist["name"],
+                "Distribución": label,
                 "Constructor Meridian": dist["meridian"],
                 "Parámetros (orden Meridian)": ordered_params,
             }
@@ -343,9 +427,9 @@ def build_pdf_report(all_data, summary_df, statistics_df):
         )
 
         plot_ax = report_fig.add_subplot(grid[0])
-        for dist, x, y, p in all_data:
-            plot_ax.plot(x, y, color=dist["color"], lw=2.2, label=dist["name"])
-            plot_ax.fill_between(x, y, color=dist["color"], alpha=0.16)
+        for dist, x, y, p, label, color, linestyle in all_data:
+            plot_ax.plot(x, y, color=color, lw=2.2, linestyle=linestyle, label=label)
+            plot_ax.fill_between(x, y, color=color, alpha=0.16)
         plot_ax.set_title("Distribuciones a priori superpuestas", fontweight="bold")
         plot_ax.set_xlabel("Valor")
         plot_ax.set_ylabel("Densidad")
@@ -363,8 +447,8 @@ def build_pdf_report(all_data, summary_df, statistics_df):
             loc="center",
         )
         table.auto_set_font_size(False)
-        table.set_fontsize(8)
-        table.scale(1, 1.55)
+        table.set_fontsize(max(5, 8 - 0.15 * max(0, len(statistics_df) - 7)))
+        table.scale(1, max(0.9, 1.55 - 0.03 * max(0, len(statistics_df) - 7)))
         report_fig.tight_layout(rect=[0, 0, 1, 0.97])
         pdf.savefig(report_fig)
         plt.close(report_fig)
@@ -380,8 +464,8 @@ def build_pdf_report(all_data, summary_df, statistics_df):
             loc="center",
         )
         config_table.auto_set_font_size(False)
-        config_table.set_fontsize(9)
-        config_table.scale(1, 2)
+        config_table.set_fontsize(max(5, 9 - 0.15 * max(0, len(summary_df) - 7)))
+        config_table.scale(1, max(0.9, 2 - 0.04 * max(0, len(summary_df) - 7)))
         config_fig.tight_layout()
         pdf.savefig(config_fig)
         plt.close(config_fig)
@@ -404,9 +488,19 @@ def build_download_zip(all_data, summary_df):
         gallery_fig = plot_grid(all_data)
         archive.writestr("galeria_distribuciones.png", figure_as_png(gallery_fig))
 
-        for index, (dist, x, y, p) in enumerate(all_data, start=1):
+        for index, (dist, x, y, p, label, color, linestyle) in enumerate(all_data, start=1):
             individual_fig, individual_ax = plt.subplots(figsize=(7, 4.5))
-            plot_single(individual_ax, dist, x, y, show_stats=True, params=p)
+            plot_single(
+                individual_ax,
+                dist,
+                x,
+                y,
+                show_stats=True,
+                params=p,
+                label=label,
+                color=color,
+                linestyle=linestyle,
+            )
             filename = f"{index:02d}_{dist['key']}.png"
             archive.writestr(filename, figure_as_png(individual_fig))
 
@@ -416,31 +510,52 @@ def build_download_zip(all_data, summary_df):
 # ---------------------------------------------------------------------------
 # Sidebar: widgets en el orden exacto de la lista de distribuciones
 # ---------------------------------------------------------------------------
+initialize_instances()
 st.sidebar.title("Parámetros de los priors")
 
 if st.sidebar.button("Restaurar defaults de Meridian"):
-    for dist in DISTRIBUTIONS:
-        st.session_state[f"show_{dist['key']}"] = True
-        for spec in dist["params"]:
-            st.session_state[f"{dist['key']}_{spec['key']}"] = spec["default"]
+    clear_all_instance_widget_keys()
+    st.session_state.instances = [
+        make_instance(family, f"{family['key']}-1", visible=False)
+        for family in DISTRIBUTIONS
+    ]
+    st.session_state.instance_counters = {family["key"]: 1 for family in DISTRIBUTIONS}
     st.rerun()
 
-params = {}
-show_flags = {}
-for dist in DISTRIBUTIONS:
-    with st.sidebar.expander(dist["name"]):
-        show_flags[dist["key"]] = st.checkbox("Mostrar", key=f"show_{dist['key']}")
-        p = {}
-        for spec in dist["params"]:
-            p[spec["key"]] = st.slider(
-                spec["label"],
-                min_value=spec["min"],
-                max_value=spec["max"],
-                value=spec["default"],
-                step=spec["step"],
-                key=f"{dist['key']}_{spec['key']}",
-            )
-        params[dist["key"]] = p
+for family in DISTRIBUTIONS:
+    with st.sidebar.expander(family["name"]):
+        if st.button(f"Añadir {family['name']}", key=f"add::{family['key']}"):
+            instance_id = next_instance_id(family["key"])
+            st.session_state.instances.append(make_instance(family, instance_id))
+            st.rerun()
+
+        instances = family_instances(family["key"])
+        for position, instance in enumerate(instances, start=1):
+            st.markdown(f"**Instancia {position}**")
+            instance_id = instance["id"]
+            show_key = f"show::{instance_id}"
+            if show_key not in st.session_state:
+                st.session_state[show_key] = instance["visible"]
+            instance["visible"] = st.checkbox("Mostrar", key=show_key)
+
+            for spec in family["params"]:
+                widget_key = f"param::{instance_id}::{spec['key']}"
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = instance["params"][spec["key"]]
+                instance["params"][spec["key"]] = st.slider(
+                    spec["label"],
+                    min_value=spec["min"],
+                    max_value=spec["max"],
+                    step=spec["step"],
+                    key=widget_key,
+                )
+
+            if st.button("Eliminar instancia", key=f"remove::{instance_id}"):
+                clear_instance_widget_keys(instance_id)
+                st.session_state.instances = [
+                    item for item in st.session_state.instances if item["id"] != instance_id
+                ]
+                st.rerun()
 
 # ---------------------------------------------------------------------------
 # Área principal
@@ -455,20 +570,26 @@ view = st.radio("Vista", ["Rejilla", "Superpuesto"], horizontal=True)
 
 active_data = []
 errors = []
-for dist in DISTRIBUTIONS:
-    try:
-        x, y = compute_density(dist["key"], params[dist["key"]])
-        data = (dist, x, y, params[dist["key"]])
-        if show_flags[dist["key"]]:
-            active_data.append(data)
-    except ValueError as exc:
-        errors.append(f"{dist['name']}: {exc}")
+for family in DISTRIBUTIONS:
+    for family_index, instance in enumerate(family_instances(family["key"])):
+        if not instance["visible"]:
+            continue
+        try:
+            params = instance["params"]
+            x, y = compute_density(family["key"], params)
+            color, linestyle = instance_style(family, family_index)
+            label = instance_label(family, params)
+            active_data.append((family, x, y, params, label, color, linestyle))
+        except ValueError as exc:
+            errors.append(f"{family['name']} (instancia {family_index + 1}): {exc}")
+
+active_data = make_unique_labels(active_data)
 
 for msg in errors:
     st.warning(msg)
 
 if not active_data:
-    st.info("Activa al menos una distribución en la barra lateral para verla.")
+    st.info("No hay distribuciones visibles. Marca «Mostrar» en la barra lateral para visualizarlas.")
 else:
     with st.expander("Código Meridian equivalente"):
         st.code(build_snippet(active_data), language="python")
